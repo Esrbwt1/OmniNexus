@@ -3,6 +3,7 @@
 
 from abc import ABC, abstractmethod
 import re # For simple word counting
+import collections
 
 # --- Base Agent Class ---
 
@@ -65,70 +66,211 @@ class BaseAgent(ABC):
 
 class WordCountAgent(BaseAgent):
     """
-    A simple agent that counts words in the provided text data.
+    A simple agent that counts words in the text data provided via
+    standard Data Item format (Phase 2).
     """
 
     @classmethod
     def get_config_schema(cls):
-        # This agent has no specific configuration parameters needed at creation time
         return {}
 
     def validate_config(self):
-        """No specific configuration to validate for this agent."""
-        # Could add checks if config is not empty, if desired
-        if self.config:
+        if self.config and self.config != {'type': 'word_counter'}: # Allow the type key from factory
              print(f"Warning: WordCountAgent '{self.agent_id}' received unexpected config: {self.config}")
-        pass # No validation needed for empty config
+        pass
 
     def get_metadata(self):
         """Returns metadata about the WordCountAgent."""
         return {
             "agent_id": self.agent_id,
             "type": "word_counter",
-            "description": "Counts the total number of words in provided text inputs.",
-            "input_format": "List of dictionaries, each with a 'content' key containing text.",
-            "output_format": "Dictionary {'total_words': count}"
+            "description": "Counts the total number of words in the 'content' field of the payload within standard Data Items.",
+            "input_format": "List[Dict] conforming to protocol.DATA_ITEM_STRUCTURE with text in payload['content']",
+            "output_format": "Dictionary {'total_words': count, 'items_processed': N, 'items_skipped': M}"
         }
 
     def execute(self, data_inputs, parameters=None):
         """
-        Counts words in the 'content' field of each item in data_inputs.
-        :param data_inputs: List of dicts, e.g., [{'content': 'text one'}, {'content': 'text two'}]
+        Counts words in payload['content'] of each valid Data Item.
+        :param data_inputs: List[Dict] conforming to protocol.DATA_ITEM_STRUCTURE
         :param parameters: Ignored by this agent.
-        :return: Dictionary {'total_words': count}
+        :return: Dictionary {'total_words': count, 'items_processed': N, 'items_skipped': M}
         """
         total_words = 0
+        items_processed = 0
+        items_skipped = 0
+
         if not isinstance(data_inputs, list):
              print(f"Error: WordCountAgent expects a list of data inputs, got {type(data_inputs)}")
-             return {"total_words": 0, "error": "Invalid input format"}
+             return {"total_words": 0, "items_processed": 0, "items_skipped": len(data_inputs) if isinstance(data_inputs, list) else 1 , "error": "Invalid input format: Expected list"}
 
         print(f"WordCountAgent '{self.agent_id}' executing on {len(data_inputs)} data inputs...")
 
         for item in data_inputs:
-            if isinstance(item, dict) and 'content' in item:
-                content = item['content']
-                if isinstance(content, str):
-                    # Simple word count: split by whitespace and count non-empty tokens
-                    words = re.findall(r'\b\w+\b', content) # Find sequences of word characters
-                    count = len(words)
-                    total_words += count
-                    # print(f"  - Processed input with {count} words.") # Optional: uncomment for debugging
-                else:
-                    print(f"Warning: Input item 'content' is not a string: {type(content)}")
+            # Validate basic structure
+            if not isinstance(item, dict) or 'payload' not in item or not isinstance(item['payload'], dict) or 'content' not in item['payload']:
+                print(f"Warning: Skipping item due to missing structure (payload or payload['content']): {item.get('item_id', 'N/A')}")
+                items_skipped += 1
+                continue
+
+            content = item['payload']['content']
+            if isinstance(content, str):
+                # Simple word count using regex
+                words = re.findall(r'\b\w+\b', content)
+                count = len(words)
+                total_words += count
+                items_processed += 1
+                # Debug print (optional):
+                # source = item.get('source_uri', item.get('item_id', 'N/A'))
+                # print(f"  - Processed item {source} with {count} words.")
             else:
-                print(f"Warning: Skipping invalid input item format: {item}")
+                print(f"Warning: Skipping item {item.get('item_id', 'N/A')} because payload['content'] is not a string: {type(content)}")
+                items_skipped += 1
 
-        print(f"WordCountAgent '{self.agent_id}' finished execution. Total words: {total_words}")
-        return {"total_words": total_words}
+        print(f"WordCountAgent '{self.agent_id}' finished execution. Words: {total_words}, Processed: {items_processed}, Skipped: {items_skipped}")
+        return {
+            "total_words": total_words,
+            "items_processed": items_processed,
+            "items_skipped": items_skipped
+        }
 
+
+# Basic English stop words list (can be expanded significantly)
+STOP_WORDS = set([
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "aren't", "as", "at",
+    "be", "because", "been", "before", "being", "below", "between", "both", "but", "by",
+    "can't", "cannot", "could", "couldn't", "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during",
+    "each", "few", "for", "from", "further", "had", "hadn't", "has", "hasn't", "have", "haven't", "having", "he", "he'd",
+    "he'll", "he's", "her", "here", "here's", "hers", "herself", "him", "himself", "his", "how", "how's",
+    "i", "i'd", "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't", "it", "it's", "its", "itself",
+    "let's", "me", "more", "most", "mustn't", "my", "myself",
+    "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other", "ought", "our", "ours", "ourselves", "out", "over", "own",
+    "same", "shan't", "she", "she'd", "she'll", "she's", "should", "shouldn't", "so", "some", "such",
+    "than", "that", "that's", "the", "their", "theirs", "them", "themselves", "then", "there", "there's", "these", "they", "they'd",
+    "they'll", "they're", "they've", "this", "those", "through", "to", "too", "under", "until", "up", "very",
+    "was", "wasn't", "we", "we'd", "we'll", "we're", "we've", "were", "weren't", "what", "what's", "when", "when's", "where",
+    "where's", "which", "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would", "wouldn't",
+    "you", "you'd", "you'll", "you're", "you've", "your", "yours", "yourself", "yourselves",
+    # Consider adding common short words or context-specific words if needed
+    "fig", "figure", "table", "also", "data", "using", "used" # Example additions
+])
+
+class KeywordExtractAgent(BaseAgent):
+    """
+    A simple agent that extracts potential keywords based on word frequency,
+    after removing common stop words. Uses standard Data Items (Phase 2).
+    """
+
+    @classmethod
+    def get_config_schema(cls):
+        return {
+            "num_keywords": {"type": "integer", "required": False, "default": 10, "description": "Maximum number of keywords to return per execution."},
+            "min_word_length": {"type": "integer", "required": False, "default": 3, "description": "Minimum length of a word to be considered a keyword."}
+        }
+
+    def validate_config(self):
+        """Validate configuration."""
+        schema = self.get_config_schema()
+        num_k = self.config.get("num_keywords", schema['num_keywords']['default'])
+        min_len = self.config.get("min_word_length", schema['min_word_length']['default'])
+
+        if not isinstance(num_k, int) or num_k <= 0:
+            raise ValueError("'num_keywords' must be a positive integer.")
+        if not isinstance(min_len, int) or min_len < 1:
+            raise ValueError("'min_word_length' must be a positive integer >= 1.")
+
+        # Ensure defaults are set in the instance config if not provided
+        self.config['num_keywords'] = num_k
+        self.config['min_word_length'] = min_len
+
+    def get_metadata(self):
+        """Returns metadata about the KeywordExtractAgent."""
+        return {
+            "agent_id": self.agent_id,
+            "type": "keyword_extractor",
+            "description": "Extracts keywords from text content in Data Items based on frequency (excluding stop words).",
+            "config_schema": self.get_config_schema(),
+            "input_format": "List[Dict] conforming to protocol.DATA_ITEM_STRUCTURE with text in payload['content']",
+            "output_format": "Dictionary {'keywords': [{'word': w, 'score': count}, ...], 'items_processed': N, 'items_skipped': M}"
+        }
+
+    def execute(self, data_inputs, parameters=None):
+        """
+        Extracts keywords from payload['content'] of each valid Data Item.
+        :param data_inputs: List[Dict] conforming to protocol.DATA_ITEM_STRUCTURE
+        :param parameters: Optional dictionary, potentially overriding config for this run (e.g., {"num_keywords": 5}). Ignored if not provided.
+        :return: Dictionary {'keywords': List[Dict{'word', 'score'}], 'items_processed': N, 'items_skipped': M}
+        """
+        items_processed = 0
+        items_skipped = 0
+        word_counts = collections.Counter()
+
+        # Determine parameters for this run (override config if provided)
+        run_params = self.config.copy() # Start with agent's base config
+        if isinstance(parameters, dict):
+            # Basic validation/override for known params
+            num_k_override = parameters.get("num_keywords")
+            min_len_override = parameters.get("min_word_length")
+            try:
+                if num_k_override is not None: run_params['num_keywords'] = int(num_k_override)
+                if min_len_override is not None: run_params['min_word_length'] = int(min_len_override)
+                if run_params['num_keywords'] <= 0: raise ValueError("num_keywords must be positive")
+                if run_params['min_word_length'] < 1: raise ValueError("min_word_length must be >= 1")
+            except (ValueError, TypeError) as e:
+                print(f"Warning: Invalid execution parameter provided, using agent default config. Error: {e}")
+                run_params = self.config.copy() # Revert to original on error
+
+        num_keywords_to_return = run_params['num_keywords']
+        min_word_length = run_params['min_word_length']
+
+        print(f"KeywordExtractAgent '{self.agent_id}' executing on {len(data_inputs)} data inputs...")
+        print(f"  Parameters: num_keywords={num_keywords_to_return}, min_word_length={min_word_length}")
+
+        if not isinstance(data_inputs, list):
+             print(f"Error: KeywordExtractAgent expects a list, got {type(data_inputs)}")
+             return {"keywords": [], "items_processed": 0, "items_skipped": len(data_inputs) if isinstance(data_inputs, list) else 1, "error": "Invalid input format: Expected list"}
+
+        for item in data_inputs:
+            if not isinstance(item, dict) or 'payload' not in item or not isinstance(item['payload'], dict) or 'content' not in item['payload']:
+                print(f"Warning: Skipping item due to missing structure: {item.get('item_id', 'N/A')}")
+                items_skipped += 1
+                continue
+
+            content = item['payload'].get('content')
+            if isinstance(content, str):
+                # Naive keyword extraction: lowercase, split, filter stop words & length
+                words = re.findall(r'\b\w+\b', content.lower())
+                potential_keywords = [
+                    word for word in words
+                    if word not in STOP_WORDS and len(word) >= min_word_length
+                ]
+                word_counts.update(potential_keywords)
+                items_processed += 1
+            else:
+                print(f"Warning: Skipping item {item.get('item_id', 'N/A')} because payload['content'] is not a string: {type(content)}")
+                items_skipped += 1
+
+        # Get the most common keywords
+        most_common = word_counts.most_common(num_keywords_to_return)
+
+        # Format output
+        result_keywords = [{"word": word, "score": count} for word, count in most_common]
+
+        print(f"KeywordExtractAgent '{self.agent_id}' finished. Found {len(result_keywords)} keywords. Processed: {items_processed}, Skipped: {items_skipped}")
+        return {
+            "keywords": result_keywords,
+            "items_processed": items_processed,
+            "items_skipped": items_skipped
+        }
 
 # --- Agent Registry and Factory ---
 
-# Dictionary to hold available agent *classes*
+# Add the new agent class to the registry dictionary
 _agent_types = {
-    "word_counter": WordCountAgent
-    # Future: Add more agent types here (e.g., "summarizer", "keyword_extractor")
+    "word_counter": WordCountAgent,
+    "keyword_extractor": KeywordExtractAgent # Add the new type here
 }
+
 
 def get_available_agent_types():
     """Returns a list of registered agent type names."""

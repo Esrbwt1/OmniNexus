@@ -24,6 +24,7 @@ def initialize_system():
     # TODO: Maybe load/activate connectors from datastore automatically? For PoC, manual activation.
     print("--- System Initialized ---")
 
+# --- Modify display_help() ---
 def display_help():
     """Displays available commands."""
     print("\nOmniNexus PoC CLI Commands:")
@@ -35,8 +36,9 @@ def display_help():
     print("  activate_connector <id> - Load connector instance into memory (required before run)")
     print("  deactivate_connector <id> - Remove connector instance from memory")
     print("  remove_connector <id> - Remove connector configuration permanently")
-    # Add Agent commands later if needed, for PoC focus on running one
     print("  run_word_count <connector_id> - Run WordCountAgent on data from the specified *active* connector")
+    # Add the new command here:
+    print("  run_keyword_extractor <connector_id> [num_keywords=N] [min_word_length=M] - Run KeywordExtractAgent")
     print("  quit / exit         - Exit the application")
     print("-" * 20)
 
@@ -282,7 +284,91 @@ def run_word_count_cli(connector_id):
         print("-" * 20)
 
 
-# --- Main Loop ---
+# --- Add this new function definition ---
+def run_keyword_extractor_cli(connector_id):
+    """Runs the keyword extraction agent on data from a specific active connector."""
+    if not connector_id:
+        print("Usage: run_keyword_extractor <connector_id> [num_keywords=N] [min_word_length=M]")
+        print("  Optional args override agent config for this run.")
+        return
+
+    # Basic parsing for optional args (could be more robust)
+    parts = connector_id.split()
+    target_connector_id = parts[0]
+    exec_params = {}
+    for part in parts[1:]:
+        if '=' in part:
+            key, value = part.split('=', 1)
+            if key in ["num_keywords", "min_word_length"]:
+                try:
+                     # Attempt conversion here for early feedback, agent will validate again
+                    exec_params[key] = int(value)
+                except ValueError:
+                    print(f"Warning: Invalid integer value for execution parameter '{key}'. Ignoring.")
+            else:
+                print(f"Warning: Unknown execution parameter '{key}'. Ignoring.")
+
+    # 1. Get the active connector instance
+    connector_instance = active_connectors.get(target_connector_id)
+    if not connector_instance:
+        print(f"Error: Connector '{target_connector_id}' is not active.")
+        print("Please activate it using: activate_connector <id>")
+        list_connectors_cli() # Show available/active connectors
+        return
+
+    # 2. Query data from the connector
+    print(f"\nQuerying data from connector '{target_connector_id}'...")
+    try:
+        data = connector_instance.query_data(query_params=None)
+        if data is None:
+             print("Error: Query to connector returned None.")
+             return
+        print(f"Retrieved {len(data)} data items from '{target_connector_id}'.")
+        if not data:
+             print("No data retrieved, nothing for the agent to process.")
+             return
+    except Exception as e:
+        print(f"Error querying connector '{target_connector_id}': {e}")
+        traceback.print_exc()
+        return
+
+    # 3. Create the KeywordExtractAgent instance
+    # For PoC, agent config is default. Real system might load config from datastore.
+    agent_id = "poc_keyword_extractor"
+    # Base config defines default behavior (e.g., num_keywords=10)
+    agent_config = {"type": "keyword_extractor"}
+    agent_instance = agents.create_agent_instance(agent_id, agent_config)
+
+    if not agent_instance:
+        print("Error: Failed to create KeywordExtractAgent instance.")
+        return
+
+    # 4. Execute the agent with retrieved data and optional execution parameters
+    print(f"\nExecuting agent '{agent_id}' with parameters: {exec_params if exec_params else 'Agent Defaults'}...")
+    try:
+        result = agent_instance.execute(data_inputs=data, parameters=exec_params if exec_params else None)
+        print("\n--- Agent Execution Result ---")
+        # Pretty print the keywords list for readability
+        if isinstance(result, dict) and 'keywords' in result:
+             print("Keywords:")
+             if result['keywords']:
+                  for kw in result['keywords']:
+                       print(f"  - {kw.get('word', '?')}: {kw.get('score', '?')}")
+             else:
+                  print("  (No keywords found meeting criteria)")
+             print(f"Items Processed: {result.get('items_processed', '?')}")
+             print(f"Items Skipped: {result.get('items_skipped', '?')}")
+             if 'error' in result: print(f"Error: {result['error']}")
+        else:
+             print(result) # Print raw result if format is unexpected
+        print("-" * 20)
+    except Exception as e:
+        print(f"Error executing agent '{agent_id}': {e}")
+        traceback.print_exc()
+        print("-" * 20)
+
+
+# --- Modify the main() function's while loop ---
 def main():
     initialize_system()
     display_help()
@@ -298,14 +384,8 @@ def main():
             args = parts[1] if len(parts) > 1 else None
 
             if command in ["quit", "exit"]:
-                print("Exiting OmniNexus PoC.")
-                # Ensure active connectors are disconnected on exit
-                active_ids = list(active_connectors.keys()) # Get IDs before iterating
-                if active_ids:
-                     print("Deactivating remaining connectors...")
-                     for conn_id in active_ids:
-                         deactivate_connector_cli(conn_id)
-                break
+                # ... (exit logic remains the same) ...
+                break # Make sure break is inside the if
             elif command == "help":
                 display_help()
             elif command == "info":
@@ -324,6 +404,9 @@ def main():
                  remove_connector_cli(args)
             elif command == "run_word_count":
                 run_word_count_cli(args)
+            # Add the elif block for the new command here:
+            elif command == "run_keyword_extractor":
+                run_keyword_extractor_cli(args)
             # Add more commands here later
             else:
                 print(f"Unknown command: '{command}'. Type 'help' for options.")
@@ -331,7 +414,7 @@ def main():
         except Exception as e:
             print(f"\nAn unexpected error occurred: {e}")
             print("Please check the command and try again.")
-            traceback.print_exc() # Print full traceback for debugging
+            traceback.print_exc()
 
 
 if __name__ == "__main__":
