@@ -1,0 +1,6 @@
+{
+    "agent1": {
+        "module": "word_counter",
+        "description": "Counts words in text files."
+    }
+}
