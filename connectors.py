@@ -4,7 +4,7 @@
 import os
 import glob
 from abc import ABC, abstractmethod
-
+import datetime
 # --- Base Connector Class ---
 
 class BaseConnector(ABC):
@@ -78,9 +78,11 @@ class BaseConnector(ABC):
 
 # --- Specific Connector Implementations ---
 
+
 class LocalFilesConnector(BaseConnector):
     """
     Connector for accessing plain text files (.txt, .md) in a local directory.
+    Adheres to Phase 2 Data Item Structure.
     """
     SUPPORTED_EXTENSIONS = ['.txt', '.md']
 
@@ -89,7 +91,7 @@ class LocalFilesConnector(BaseConnector):
         return {
             "path": {"type": "string", "required": True, "description": "Absolute path to the directory containing text files."},
             "recursive": {"type": "boolean", "required": False, "default": False, "description": "Search recursively in subdirectories."},
-            # Future: add encoding, specific extensions, etc.
+            "encoding": {"type": "string", "required": False, "default": "utf-8", "description": "Text encoding to use (e.g., utf-8, latin-1)."}
         }
 
     def validate_config(self):
@@ -104,22 +106,39 @@ class LocalFilesConnector(BaseConnector):
         if not isinstance(path, str):
              raise TypeError("Configuration key 'path' must be a string.")
         if not os.path.isdir(path):
-             raise ValueError(f"Provided path '{path}' is not a valid directory or is inaccessible.")
+             # Try resolving relative paths, useful in some contexts
+             abs_path = os.path.abspath(path)
+             if not os.path.isdir(abs_path):
+                 raise ValueError(f"Provided path '{path}' (resolved to '{abs_path}') is not a valid directory or is inaccessible.")
+             else:
+                 # Update config with absolute path if validation passes
+                 self.config['path'] = abs_path
+                 print(f"Relative path '{path}' resolved to absolute path '{abs_path}'.")
 
-        # Validate 'recursive' if present
-        recursive = self.config.get("recursive", schema['recursive']['default']) # Use default if not present
+
+        recursive = self.config.get("recursive", schema['recursive']['default'])
         if not isinstance(recursive, bool):
             raise TypeError("Configuration key 'recursive' must be a boolean (true/false).")
-        self.config['recursive'] = recursive # Ensure default is set if not provided
+        self.config['recursive'] = recursive
+
+        encoding = self.config.get("encoding", schema['encoding']['default'])
+        if not isinstance(encoding, str):
+             raise TypeError("Configuration key 'encoding' must be a string.")
+        try:
+             "test".encode(encoding) # Test if encoding is valid
+        except LookupError:
+             raise ValueError(f"Invalid encoding specified: '{encoding}'")
+        self.config['encoding'] = encoding
+
 
     def connect(self):
         """No explicit connection needed for local files."""
         print(f"LocalFilesConnector '{self.connector_id}': Ready to access '{self.config['path']}'.")
-        return True # Always succeeds if path is valid
+        return True
 
     def disconnect(self):
         """No explicit disconnection needed."""
-        pass # Nothing to clean up
+        pass
 
     def get_metadata(self):
         """Returns metadata about this local files connector."""
@@ -128,56 +147,80 @@ class LocalFilesConnector(BaseConnector):
             "type": "local_files",
             "path": self.config.get("path"),
             "recursive": self.config.get("recursive"),
+            "encoding": self.config.get("encoding"),
             "supported_extensions": self.SUPPORTED_EXTENSIONS,
             "status": "ready" if os.path.isdir(self.config.get("path", "")) else "error - path invalid"
         }
 
     def query_data(self, query_params=None):
         """
-        Retrieves content from text files in the configured directory.
-        For PoC: Returns a list of dictionaries, each containing filepath and content.
+        Retrieves content from text files, structuring output as standard Data Items.
         Ignores query_params for now.
         """
-        data = []
+        data_items = []
         base_path = self.config.get("path")
         recursive = self.config.get("recursive", False)
+        encoding = self.config.get("encoding", "utf-8") # Fallback just in case
 
         if not base_path or not os.path.isdir(base_path):
             print(f"Error: Path '{base_path}' for connector '{self.connector_id}' is invalid.")
-            return data # Return empty list
+            return data_items # Return empty list
 
-        # Prepare the glob pattern
         if recursive:
-            pattern = os.path.join(base_path, '**', '*') # Search all files in all subdirs
+            pattern = os.path.join(base_path, '**', '*')
         else:
-            pattern = os.path.join(base_path, '*') # Search only files in the base dir
+            pattern = os.path.join(base_path, '*')
 
-        print(f"Querying path: {base_path}, Recursive: {recursive}, Pattern: {pattern}")
+        print(f"Querying path: {base_path}, Recursive: {recursive}, Encoding: {encoding}")
 
         try:
-            # Use glob to find files
+            # Import protocol utilities here to avoid circular dependency at top level
+            from protocol import create_iso_timestamp, generate_item_id
+
             all_files = glob.glob(pattern, recursive=recursive)
 
             for filepath in all_files:
-                # Check if it's a file and has a supported extension
                 if os.path.isfile(filepath):
                     _, ext = os.path.splitext(filepath)
                     if ext.lower() in self.SUPPORTED_EXTENSIONS:
                         try:
-                            with open(filepath, 'r', encoding='utf-8') as f:
+                            # Get file metadata
+                            stat_result = os.stat(filepath)
+                            created_time = datetime.datetime.fromtimestamp(stat_result.st_ctime, tz=datetime.timezone.utc).isoformat()
+                            modified_time = datetime.datetime.fromtimestamp(stat_result.st_mtime, tz=datetime.timezone.utc).isoformat()
+                            file_size = stat_result.st_size
+
+                            # Read content
+                            with open(filepath, 'r', encoding=encoding) as f:
                                 content = f.read()
-                            data.append({
-                                "filepath": filepath,
-                                "content": content,
-                                "connector_id": self.connector_id # Tag data with its source
-                            })
+
+                            # Create Data Item
+                            item = {
+                                "item_id": generate_item_id(),
+                                "connector_id": self.connector_id,
+                                "source_uri": f"file://{os.path.abspath(filepath)}", # Use file URI scheme
+                                "retrieved_at": create_iso_timestamp(),
+                                "metadata": {
+                                    "type": "text/plain" if ext.lower() == '.txt' else "text/markdown",
+                                    "filename": os.path.basename(filepath),
+                                    "created_time": created_time,
+                                    "modified_time": modified_time,
+                                    "size_bytes": file_size,
+                                    "encoding": encoding,
+                                    "full_path": os.path.abspath(filepath) # Keep path accessible if needed
+                                },
+                                "payload": {
+                                    "content": content
+                                }
+                            }
+                            data_items.append(item)
                         except Exception as e:
-                            print(f"Warning: Could not read file '{filepath}': {e}")
-            return data
+                            print(f"Warning: Could not process file '{filepath}': {e}")
+            return data_items
 
         except Exception as e:
              print(f"Error querying files for connector '{self.connector_id}': {e}")
-             return [] # Return empty list on error
+             return []
 
 
 # --- Connector Registry and Factory ---
