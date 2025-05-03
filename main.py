@@ -235,13 +235,24 @@ def run_word_count_cli(connector_id):
         print("Usage: run_word_count <connector_id>")
         return
 
-    # 1. Get the active connector instance
+        # 1. Get or automatically activate the connector instance
+    if not connector_id: # Handle case where no ID was provided to the command
+        print("Usage: run_word_count <connector_id>")
+        return
+
     connector_instance = active_connectors.get(connector_id)
     if not connector_instance:
-        print(f"Error: Connector '{connector_id}' is not active.")
-        print("Please activate it using: activate_connector <id>")
-        list_connectors_cli() # Show available/active connectors
-        return
+        print(f"Connector '{connector_id}' is not active. Attempting auto-activation...")
+        # Call the activation function internally. Pass only the ID.
+        # Note: activate_connector_cli prints its own messages.
+        # We need to check if it succeeded by seeing if the instance is now in active_connectors.
+        activate_connector_cli(connector_id) # Attempt activation
+        connector_instance = active_connectors.get(connector_id) # Check again
+        if not connector_instance:
+            print(f"Auto-activation failed for '{connector_id}'. Cannot proceed.")
+            return # Exit if activation failed
+        else:
+            print(f"Connector '{connector_id}' auto-activated successfully.")
 
     # 2. Query data from the connector
     print(f"\nQuerying data from connector '{connector_id}'...")
@@ -308,13 +319,17 @@ def run_keyword_extractor_cli(connector_id):
             else:
                 print(f"Warning: Unknown execution parameter '{key}'. Ignoring.")
 
-    # 1. Get the active connector instance
+    # 1. Get or automatically activate the connector instance
     connector_instance = active_connectors.get(target_connector_id)
     if not connector_instance:
-        print(f"Error: Connector '{target_connector_id}' is not active.")
-        print("Please activate it using: activate_connector <id>")
-        list_connectors_cli() # Show available/active connectors
-        return
+        print(f"Connector '{target_connector_id}' is not active. Attempting auto-activation...")
+        activate_connector_cli(target_connector_id) # Attempt activation
+        connector_instance = active_connectors.get(target_connector_id) # Check again
+        if not connector_instance:
+            print(f"Auto-activation failed for '{target_connector_id}'. Cannot proceed.")
+            return # Exit if activation failed
+        else:
+            print(f"Connector '{target_connector_id}' auto-activated successfully.")
 
     # 2. Query data from the connector
     print(f"\nQuerying data from connector '{target_connector_id}'...")
