@@ -223,31 +223,36 @@ class LocalFilesConnector(BaseConnector):
              return []
 
 
-# Add near the top with other imports
+# Add near the top if not already there
 import imaplib
 import email
-import socket # For timeout handling later
-import ssl # For secure connection later
+from email.header import decode_header, make_header
+import socket # For timeout handling
+import ssl # For secure connection
+import re # For cleaning up headers potentially
 
 # (Keep BaseConnector and LocalFilesConnector classes above this)
 
 class ImapConnector(BaseConnector):
     """
-    Connector for accessing emails via IMAP protocol. (Skeleton for Phase 2)
-    Handles basic connection structure and config. Fetching logic TBD.
+    Connector for accessing emails via IMAP protocol. (Phase 2 Implementation)
+    Handles connection, login, and fetching basic header info for recent emails.
+    WARNING: Currently retrieves password insecurely from config.
     """
-    DEFAULT_IMAP_PORT = 993 # Standard IMAP over SSL port
+    DEFAULT_IMAP_PORT_SSL = 993
+    DEFAULT_IMAP_PORT_NONSSL = 143
+    DEFAULT_FETCH_COUNT = 5 # Number of recent emails to fetch headers for
 
     @classmethod
     def get_config_schema(cls):
         return {
             "server": {"type": "string", "required": True, "description": "IMAP server address (e.g., imap.gmail.com)."},
-            "port": {"type": "integer", "required": False, "default": cls.DEFAULT_IMAP_PORT, "description": "IMAP server port."},
+            "port": {"type": "integer", "required": False, "default": None, "description": f"IMAP server port (defaults: {cls.DEFAULT_IMAP_PORT_SSL} for SSL, {cls.DEFAULT_IMAP_PORT_NONSSL} otherwise)."},
             "username": {"type": "string", "required": True, "description": "Email account username."},
-            "password_or_token": {"type": "string", "required": True, "description": "Account password or App Password/Token (store securely!)."}, # SECURITY WARNING
+            "password_or_token": {"type": "string", "required": True, "description": "Account password or App Password/Token (stored insecurely!)."}, # SECURITY WARNING
             "mailbox": {"type": "string", "required": False, "default": "INBOX", "description": "Mailbox/folder to access."},
             "use_ssl": {"type": "boolean", "required": False, "default": True, "description": "Use SSL/TLS for connection."},
-            # Future: add search criteria, date ranges, etc.
+            "fetch_count": {"type": "integer", "required": False, "default": cls.DEFAULT_FETCH_COUNT, "description": "Number of recent emails to fetch headers for."},
         }
 
     def __init__(self, connector_id, config):
@@ -255,43 +260,51 @@ class ImapConnector(BaseConnector):
         super().__init__(connector_id, config)
         self.connection = None # Holds the imaplib connection object
         self._is_connected = False
+        self._selected_mailbox = None
 
     def validate_config(self):
         """Validates the configuration for ImapConnector."""
         schema = self.get_config_schema()
         required_keys = {k for k, v in schema.items() if v.get("required")}
         provided_keys = set(self.config.keys())
-
-        # Remove 'type' as it's handled by the factory
-        provided_keys.discard('type')
+        provided_keys.discard('type') # Ignore 'type' key
 
         if not required_keys.issubset(provided_keys):
              missing = required_keys - provided_keys
              raise ValueError(f"Missing required configuration keys: {missing}")
 
-        # Basic type checks (can be expanded)
+        # Basic type checks and default assignments
         if not isinstance(self.config.get("server"), str): raise TypeError("Config 'server' must be a string.")
         if not isinstance(self.config.get("username"), str): raise TypeError("Config 'username' must be a string.")
-        if not isinstance(self.config.get("password_or_token"), str): raise TypeError("Config 'password_or_token' must be a string.") # Stored insecurely for now!
-        port = self.config.get("port", schema['port']['default'])
-        if not isinstance(port, int): raise TypeError("Config 'port' must be an integer.")
+        if not isinstance(self.config.get("password_or_token"), str): raise TypeError("Config 'password_or_token' must be a string.")
+
         use_ssl = self.config.get("use_ssl", schema['use_ssl']['default'])
         if not isinstance(use_ssl, bool): raise TypeError("Config 'use_ssl' must be a boolean.")
+        self.config['use_ssl'] = use_ssl # Ensure default is set
+
+        default_port = self.DEFAULT_IMAP_PORT_SSL if use_ssl else self.DEFAULT_IMAP_PORT_NONSSL
+        port = self.config.get("port", default_port)
+        # Allow overriding default even if None was explicitly passed in schema default
+        if port is None: port = default_port
+        if not isinstance(port, int): raise TypeError("Config 'port' must be an integer.")
+        self.config['port'] = port # Ensure default is set
+
         mailbox = self.config.get("mailbox", schema['mailbox']['default'])
         if not isinstance(mailbox, str): raise TypeError("Config 'mailbox' must be a string.")
-
-        # Assign defaults if not present
-        self.config['port'] = port
-        self.config['use_ssl'] = use_ssl
         self.config['mailbox'] = mailbox
+
+        fetch_count = self.config.get("fetch_count", schema['fetch_count']['default'])
+        if not isinstance(fetch_count, int) or fetch_count <= 0:
+            raise ValueError("Config 'fetch_count' must be a positive integer.")
+        self.config['fetch_count'] = fetch_count
 
         print("IMAP Config basic validation passed. WARNING: Password stored insecurely in config!")
 
 
     def connect(self):
-        """Establishes connection to the IMAP server and logs in."""
+        """Establishes connection to the IMAP server, logs in, and selects mailbox."""
         if self._is_connected:
-            print(f"IMAP connector '{self.connector_id}' already connected.")
+            print(f"IMAP connector '{self.connector_id}' already connected to mailbox '{self._selected_mailbox}'.")
             return True
 
         server = self.config.get("server")
@@ -299,116 +312,257 @@ class ImapConnector(BaseConnector):
         use_ssl = self.config.get("use_ssl")
         username = self.config.get("username")
         password = self.config.get("password_or_token") # INSECURE retrieval
+        mailbox = self.config.get("mailbox")
 
-        print(f"Connecting to IMAP server {server}:{port} for user {username}...")
+        print(f"Connecting to IMAP {server}:{port} (SSL: {use_ssl}) for user {username}...")
 
         try:
-            # === Placeholder Connection Logic ===
-            # A real implementation requires error handling, timeouts, choosing SSL/TLS correctly.
-            print("Placeholder: Simulating IMAP connection and login.")
-            # Example (needs refinement):
-            # if use_ssl:
-            #     self.connection = imaplib.IMAP4_SSL(server, port)
-            # else:
-            #     self.connection = imaplib.IMAP4(server, port)
-            # status, messages = self.connection.login(username, password)
-            # if status != 'OK':
-            #     raise imaplib.IMAP4.error(f"Login failed: {messages}")
-            # print("IMAP login successful.")
-            # status, messages = self.connection.select(self.config['mailbox'])
-            # if status != 'OK':
-            #     raise imaplib.IMAP4.error(f"Mailbox selection failed: {messages}")
-            # print(f"Mailbox '{self.config['mailbox']}' selected.")
+            # Establish connection
+            if use_ssl:
+                # Consider adding SSL context for better security later
+                self.connection = imaplib.IMAP4_SSL(server, port)
+            else:
+                self.connection = imaplib.IMAP4(server, port)
+            print(f"Connection established.")
 
-            self._is_connected = True # Mark as connected on placeholder success
-            print(f"IMAP Connector '{self.connector_id}': Placeholder connection established.")
+            # Login
+            status, messages = self.connection.login(username, password)
+            if status != 'OK':
+                raise imaplib.IMAP4.error(f"Login failed: {' '.join(m.decode() if isinstance(m, bytes) else str(m) for m in messages)}")
+            print("IMAP login successful.")
+
+            # Select Mailbox
+            # Use read-only if possible to prevent accidental changes like marking read
+            status, messages = self.connection.select(f'"{mailbox}"', readonly=True)
+            # Fallback if readonly isn't supported
+            if status != 'OK':
+                 print(f"Read-only mailbox selection failed, trying read-write: {' '.join(m.decode() if isinstance(m, bytes) else str(m) for m in messages)}")
+                 status, messages = self.connection.select(f'"{mailbox}"', readonly=False)
+                 if status != 'OK':
+                      raise imaplib.IMAP4.error(f"Mailbox selection failed: {' '.join(m.decode() if isinstance(m, bytes) else str(m) for m in messages)}")
+
+            # `messages` usually contains the count of messages in the mailbox
+            message_count = int(messages[0]) if messages and messages[0].isdigit() else 'N/A'
+            print(f"Mailbox '{mailbox}' selected successfully ({message_count} messages).")
+            self._selected_mailbox = mailbox
+            self._is_connected = True
             return True
 
         except (imaplib.IMAP4.error, socket.gaierror, socket.timeout, ssl.SSLError) as e:
             print(f"Error connecting/logging into IMAP server {server}: {e}")
+            # Ensure connection is closed/nulled if partially opened
+            if self.connection:
+                try: self.connection.shutdown() # Close SSL connection if applicable
+                except: pass # Ignore errors during cleanup
             self.connection = None
             self._is_connected = False
+            self._selected_mailbox = None
             return False
         except Exception as e:
              print(f"Unexpected error during IMAP connection: {e}")
+             traceback.print_exc()
              self.connection = None
              self._is_connected = False
+             self._selected_mailbox = None
              return False
 
 
     def disconnect(self):
         """Logs out and closes the IMAP connection."""
-        if self.connection and self._is_connected:
+        if self.connection:
             print(f"Disconnecting IMAP connector '{self.connector_id}'...")
             try:
-                # === Placeholder Disconnect Logic ===
-                print("Placeholder: Simulating IMAP logout and close.")
-                # Example (needs refinement):
-                # self.connection.close() # Close current mailbox first
-                # self.connection.logout()
-                # print("IMAP logout successful.")
-            except imaplib.IMAP4.error as e:
-                print(f"Error during IMAP logout/close: {e}")
+                # Unselect mailbox (implicitly done by close sometimes, but good practice)
+                 if self._selected_mailbox:
+                     try:
+                         self.connection.close()
+                         # print("Mailbox closed.")
+                     except imaplib.IMAP4.error as e:
+                         # Ignore errors closing if logout still works
+                         print(f"Note: Error closing mailbox (might be ok): {e}")
+                 # Logout
+                 try:
+                     status, msg = self.connection.logout()
+                     # print(f"IMAP logout status: {status} - {msg}")
+                 except Exception as e:
+                      # Ignore errors if connection is likely dead anyway
+                      print(f"Note: Error during logout (might be ok): {e}")
+
             finally:
+                # Ensure state is reset even if logout had issues
                 self.connection = None
                 self._is_connected = False
+                self._selected_mailbox = None
+                print(f"IMAP connector '{self.connector_id}' disconnected.")
         else:
-            print(f"IMAP connector '{self.connector_id}' already disconnected or never connected.")
+            # print(f"IMAP connector '{self.connector_id}' already disconnected.") # Can be noisy
+            self._is_connected = False # Ensure state is correct
+            self._selected_mailbox = None
 
 
     def get_metadata(self):
         """Returns metadata about this IMAP connector."""
+        status = "disconnected"
+        if self._is_connected and self._selected_mailbox:
+            status = f"connected to '{self._selected_mailbox}'"
+        elif self.connection: # Might be connected but mailbox select failed
+            status = "connected (no mailbox)"
+
         return {
             "connector_id": self.connector_id,
             "type": "imap",
             "server": self.config.get("server"),
             "port": self.config.get("port"),
             "username": self.config.get("username"),
-            "mailbox": self.config.get("mailbox"),
-            "status": "connected" if self._is_connected else "disconnected"
-            # Future: add email counts, capabilities etc.
+            "status": status
+            # Could add mailbox count from connection if stored
         }
+
+    def _decode_header(self, header_text):
+        """Decodes email header text, handling different encodings."""
+        if header_text is None:
+            return ""
+        try:
+            # Use email.header.make_header to handle decoding and joining parts
+            decoded_header = make_header(decode_header(str(header_text)))
+            return str(decoded_header)
+        except Exception:
+            # Fallback for unexpected errors or non-standard headers
+            try:
+                return str(header_text).encode('raw_unicode_escape').decode('utf-8', 'ignore')
+            except:
+                return str(header_text) # Last resort
 
 
     def query_data(self, query_params=None):
         """
-        Fetches emails based on criteria. (Placeholder for Phase 2)
-        Should return data structured as standard Data Items.
+        Fetches basic headers (Subject, From, Date) for recent emails.
+        Returns data structured as standard Data Items.
         """
-        if not self._is_connected or not self.connection:
-            print(f"Error: IMAP connector '{self.connector_id}' is not connected.")
-            return []
+        if not self._is_connected or not self.connection or not self._selected_mailbox:
+            print(f"Error: IMAP connector '{self.connector_id}' is not connected to a mailbox.")
+            if not self.connect(): # Attempt reconnect
+                 print("Error: Reconnect failed.")
+                 return []
+            if not self._is_connected: # Check again after connect attempt
+                 return []
 
-        print(f"IMAP Connector '{self.connector_id}': Placeholder query_data called.")
-        # === Placeholder Query & Parsing Logic ===
-        # 1. Define search criteria (e.g., UNSEEN, SINCE date, FROM sender) - based on query_params
-        # 2. Use self.connection.search() to get email UIDs
-        # 3. For each UID (or batch):
-        #      Use self.connection.fetch(uid, '(RFC822)') to get raw email data
-        #      Parse raw email using `email.message_from_bytes()`
-        #      Extract headers (Subject, From, To, Date), body (plaintext/html)
-        #      Handle character encodings, attachments (TBD)
-        #      Construct a Data Item dictionary conforming to protocol.DATA_ITEM_STRUCTURE:
-        #          item_id = generate_item_id()
-        #          connector_id = self.connector_id
-        #          source_uri = f"imap://{self.config['username']}@{self.config['server']}/{self.config['mailbox']};UID={uid}"
-        #          retrieved_at = create_iso_timestamp()
-        #          metadata = { 'type': 'message/rfc822', 'subject': ..., 'from': ..., 'date': ... }
-        #          payload = { 'headers': {...}, 'body_text': ..., 'body_html': ... (optional) }
-        # 4. Append Data Item to a list
-        # 5. Return the list of Data Items
+        data_items = []
+        fetch_count = self.config.get('fetch_count', self.DEFAULT_FETCH_COUNT)
+        print(f"IMAP Connector '{self.connector_id}': Fetching headers for last {fetch_count} emails...")
 
-        # For now, return empty list
-        print("Placeholder: Returning empty list. IMAP fetching not implemented.")
-        return []
+        try:
+            # Import protocol utilities here
+            from protocol import create_iso_timestamp, generate_item_id
+
+            # 1. Search for all message UIDs in the current mailbox
+            status, messages = self.connection.search(None, 'ALL')
+            if status != 'OK':
+                print(f"Error searching mailbox: {' '.join(m.decode() for m in messages if isinstance(m, bytes))}")
+                return []
+
+            # UIDs are returned as a space-separated string in bytes
+            if not messages or not messages[0]:
+                print("No messages found in mailbox.")
+                return []
+            uids_bytes = messages[0].split()
+
+            # 2. Get the UIDs for the most recent messages
+            recent_uids = uids_bytes[-fetch_count:]
+            if not recent_uids:
+                print("No UIDs selected for fetching.")
+                return []
+
+            print(f"Found {len(uids_bytes)} total emails. Fetching details for {len(recent_uids)} UIDs: {[u.decode() for u in recent_uids]}")
+
+            # 3. Fetch headers for each UID
+            for uid_bytes in recent_uids:
+                uid = uid_bytes.decode() # Use string representation of UID
+                try:
+                    # Fetch specific header fields. BODY.PEEK avoids marking as read.
+                    fetch_command = f'(BODY.PEEK[HEADER.FIELDS (Subject From Date)])'
+                    status, msg_data = self.connection.fetch(uid_bytes, fetch_command)
+
+                    if status != 'OK':
+                        print(f"Error fetching headers for UID {uid}: Status {status}")
+                        continue
+
+                    # Check if data was actually returned for this UID
+                    if not msg_data or msg_data[0] is None:
+                         print(f"Warning: No header data returned for UID {uid}. Skipping.")
+                         continue
+
+                    # msg_data is usually [(b'UID 123 (RFC822 {size}', b'Header Content...'), b')']
+                    # We need the header content part
+                    header_bytes = None
+                    for part in msg_data:
+                        if isinstance(part, tuple) and len(part) > 1 and isinstance(part[1], bytes):
+                            header_bytes = part[1]
+                            break # Found the header bytes
+
+                    if not header_bytes:
+                         print(f"Warning: Could not parse header bytes from fetch response for UID {uid}. Response: {msg_data}")
+                         continue
+
+                    # 4. Parse headers using email module
+                    headers = email.message_from_bytes(header_bytes)
+
+                    subject = self._decode_header(headers['Subject'])
+                    sender = self._decode_header(headers['From'])
+                    email_date_str = headers['Date'] # Keep as string for now, parsing can be complex
+
+                    # 5. Construct Data Item
+                    item = {
+                        "item_id": generate_item_id(),
+                        "connector_id": self.connector_id,
+                        "source_uri": f"imap://{self.config['username']}@{self.config['server']}/{self._selected_mailbox};UID={uid}",
+                        "retrieved_at": create_iso_timestamp(),
+                        "metadata": {
+                            "type": "message/rfc822-headers", # Indicate it's only headers
+                            "uid": uid,
+                            "mailbox": self._selected_mailbox,
+                            # Add more metadata if needed
+                        },
+                        "payload": {
+                            # For headers-only fetch, put them directly in payload for easy access
+                            "subject": subject,
+                            "from": sender,
+                            "date_str": email_date_str,
+                            # In a full fetch, 'content' might hold body text/html
+                        }
+                    }
+                    data_items.append(item)
+                    # print(f"  - Processed UID {uid}: Subject='{subject[:50]}...'") # Optional debug
+
+                except Exception as e_fetch:
+                    print(f"Error processing UID {uid}: {e_fetch}")
+                    traceback.print_exc() # Print details for debugging
+                    continue # Move to next UID
+
+            print(f"Finished fetching headers. Retrieved {len(data_items)} items.")
+            return data_items
+
+        except imaplib.IMAP4.error as e:
+             print(f"IMAP error during query_data: {e}")
+             # Connection might be dead, attempt disconnect/reset state
+             self.disconnect()
+             return []
+        except Exception as e:
+             print(f"Unexpected error during IMAP query_data: {e}")
+             traceback.print_exc()
+             self.disconnect() # Disconnect on unexpected errors too
+             return []
 
 # --- Connector Registry and Factory ---
 
-# Add the new connector class to the registry dictionary
+# Ensure the connector class is in the registry dictionary
 _connector_types = {
     "local_files": LocalFilesConnector,
-    "imap": ImapConnector # Add the new type here
+    "imap": ImapConnector # Make sure this line exists
 }
+
+# (Keep get_available_connector_types, get_connector_class, create_connector_instance functions below this)
+# (Keep the __main__ block as it is)
 
 def get_available_connector_types():
     """Returns a list of registered connector type names."""
