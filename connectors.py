@@ -9,60 +9,106 @@ import datetime
 
 class BaseConnector(ABC):
     """
-    Abstract base class for all OmniNexus data connectors.
-    Defines the common interface that agents will use.
+    Abstract Base Class for all OmniNexus data connectors.
+
+    Defines the common interface for discovering, connecting to, querying,
+    and managing external data sources within the OmniNexus framework.
+
+    Subclasses must implement all methods decorated with @abstractmethod
+    and the @classmethod get_config_schema.
     """
     def __init__(self, connector_id, config):
         """
-        Initializes the connector.
-        :param connector_id: A unique identifier for this connector instance.
-        :param config: A dictionary containing configuration specific to this connector instance (e.g., path, API key).
+        Initializes the connector instance.
+
+        Should be called by subclasses using super().__init__(...).
+
+        :param connector_id: A unique identifier for this specific connector instance (e.g., 'my_local_docs').
+                             Provided by the orchestrator/user during configuration.
+        :param config: A dictionary containing configuration parameters specific
+                       to this connector instance (e.g., path, API key, server address).
+                       Must include a 'type' key matching the registered connector type.
         """
+        if not connector_id or not isinstance(connector_id, str):
+             raise ValueError("Connector ID must be a non-empty string.")
+        if not config or not isinstance(config, dict):
+             raise ValueError("Connector config must be a dictionary.")
+        # We don't validate 'type' here, assuming factory did its job based on it
+
         self.connector_id = connector_id
-        self.config = config
-        self.validate_config() # Call validation during initialization
+        # Make a copy to prevent external modification of the original config dict
+        self.config = config.copy()
+        # Validate the specific config keys required by the subclass
+        try:
+             self.validate_config()
+        except (ValueError, TypeError) as e:
+             # Add context to validation errors
+             raise type(e)(f"Configuration validation failed for connector '{connector_id}' (type '{config.get('type', 'N/A')}'): {e}")
 
     @abstractmethod
     def validate_config(self):
         """
-        Validates the provided configuration.
-        Should raise ValueError or TypeError for invalid configs.
+        Validates the self.config dictionary against the requirements of this specific connector type.
+
+        - Should check for the presence and correct types of required keys.
+        - Should validate the format or constraints of values (e.g., path exists, port is valid).
+        - May assign default values from the schema to self.config if optional keys are missing.
+        - Should raise ValueError or TypeError for invalid configurations.
         """
         pass
 
     @abstractmethod
     def connect(self):
         """
-        Establishes connection or performs necessary setup.
-        May not be needed for all connector types (e.g., local files).
-        Should return True on success, False on failure.
+        Establishes a connection to the external data source or performs necessary setup.
+
+        - For networked services (IMAP, APIs): Authenticate and establish a session.
+        - For local resources (files): May simply verify access or perform initial scans.
+        - Should store necessary connection state within the instance (e.g., self.connection object).
+        - Should update internal state flags (e.g., self._is_connected).
+        - Return True on successful connection/setup, False on failure.
         """
         pass
 
     @abstractmethod
     def disconnect(self):
         """
-        Cleans up resources or disconnects from services.
+        Cleans up resources, closes connections, and logs out from services.
+
+        - Should handle potential errors during disconnection gracefully.
+        - Should reset internal connection state flags.
+        - Called by the orchestrator when deactivating the connector or shutting down.
         """
         pass
 
     @abstractmethod
     def get_metadata(self):
         """
-        Returns metadata about the connector itself or the data source.
-        Example: type, path, connection status, capabilities.
+        Returns metadata about the connector instance and potentially the data source.
+
+        :return: A dictionary containing information such as:
+                 - connector_id: str
+                 - type: str (e.g., 'local_files', 'imap')
+                 - status: str (e.g., 'connected', 'disconnected', 'error')
+                 - Configuration details (e.g., path, server) - careful with secrets!
+                 - Potentially dynamic info (e.g., number of items, last sync time - for future)
         """
         pass
 
     @abstractmethod
     def query_data(self, query_params=None):
         """
-        The core method to retrieve data based on query parameters.
-        The structure of query_params and the returned data will vary
-        significantly between connector types.
-        For PoC, this might be simple (e.g., return all text content).
-        :param query_params: Dictionary specifying what data to retrieve.
-        :return: Data retrieved from the source (format depends on connector).
+        The core method to retrieve data from the source based on query parameters.
+
+        :param query_params: Optional dictionary specifying what data to retrieve.
+                             The structure and interpretation of these parameters are
+                             defined by the specific connector implementation.
+                             Examples: search keywords, date ranges, specific IDs, count limits.
+                             If None, the connector might return default data (e.g., all items, recent items).
+
+        :return: A list of dictionaries, where each dictionary conforms to the
+                 `protocol.DATA_ITEM_STRUCTURE`. Returns an empty list if no data
+                 matches or an error occurs during the query. Should not return None.
         """
         pass
 
@@ -70,9 +116,22 @@ class BaseConnector(ABC):
     @abstractmethod
     def get_config_schema(cls):
         """
-        Returns a description of the required configuration parameters
-        for this connector type. Useful for UI/CLI setup.
-        :return: Dictionary describing config keys, types, and if they are required.
+        Returns a schema describing the configuration parameters required by this connector type.
+
+        This is used by the UI/CLI to guide the user during setup and for validation.
+
+        :return: A dictionary where keys are parameter names and values are dictionaries
+                 describing the parameter:
+                 {
+                   "param_name": {
+                       "type": "string" | "integer" | "boolean" | "filepath" | "directorypath" | ...,
+                       "required": True | False,
+                       "default": <default_value> (if not required),
+                       "description": "User-friendly explanation."
+                   },
+                   ...
+                 }
+                 See `protocol.CONFIG_SCHEMA_FORMAT`.
         """
         pass
 
