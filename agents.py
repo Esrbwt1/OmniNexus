@@ -196,7 +196,9 @@ class KeywordExtractAgent(BaseAgent):
 
     def execute(self, data_inputs, parameters=None):
         """
-        Extracts keywords from payload['content'] of each valid Data Item.
+        Extracts keywords from relevant text fields within the payload
+        of each valid Data Item. Prioritizes 'content', falls back to
+        'subject' and 'from'.
         :param data_inputs: List[Dict] conforming to protocol.DATA_ITEM_STRUCTURE
         :param parameters: Optional dictionary, potentially overriding config for this run (e.g., {"num_keywords": 5}). Ignored if not provided.
         :return: Dictionary {'keywords': List[Dict{'word', 'score'}], 'items_processed': N, 'items_skipped': M}
@@ -208,7 +210,6 @@ class KeywordExtractAgent(BaseAgent):
         # Determine parameters for this run (override config if provided)
         run_params = self.config.copy() # Start with agent's base config
         if isinstance(parameters, dict):
-            # Basic validation/override for known params
             num_k_override = parameters.get("num_keywords")
             min_len_override = parameters.get("min_word_length")
             try:
@@ -227,28 +228,61 @@ class KeywordExtractAgent(BaseAgent):
         print(f"  Parameters: num_keywords={num_keywords_to_return}, min_word_length={min_word_length}")
 
         if not isinstance(data_inputs, list):
-             print(f"Error: KeywordExtractAgent expects a list, got {type(data_inputs)}")
-             return {"keywords": [], "items_processed": 0, "items_skipped": len(data_inputs) if isinstance(data_inputs, list) else 1, "error": "Invalid input format: Expected list"}
+            print(f"Error: KeywordExtractAgent expects a list, got {type(data_inputs)}")
+            return {"keywords": [], "items_processed": 0, "items_skipped": len(data_inputs) if isinstance(data_inputs, list) else 1, "error": "Invalid input format: Expected list"}
 
         for item in data_inputs:
-            if not isinstance(item, dict) or 'payload' not in item or not isinstance(item['payload'], dict) or 'content' not in item['payload']:
-                print(f"Warning: Skipping item due to missing structure: {item.get('item_id', 'N/A')}")
+            text_to_process = None # Initialize text source for this item
+
+            # Validate basic structure - check for payload dictionary first
+            if not isinstance(item, dict) or 'payload' not in item or not isinstance(item['payload'], dict):
+                print(f"Warning: Skipping item due to missing or invalid 'payload': {item.get('item_id', 'N/A')}")
                 items_skipped += 1
                 continue
 
-            content = item['payload'].get('content')
-            if isinstance(content, str):
+            payload = item['payload']
+
+            # Prioritize 'content' key if it exists and is a string
+            if isinstance(payload.get('content'), str):
+                text_to_process = payload['content']
+            # Fallback: If no 'content', try combining 'subject' and 'from'
+            elif not text_to_process:
+                subject = payload.get('subject', '')
+                sender = payload.get('from', '')
+                # Ensure they are strings before concatenating
+                if isinstance(subject, str) or isinstance(sender, str):
+                    combined_text = f"{str(subject)} {str(sender)}" # Combine available text
+                    if combined_text.strip(): # Check if there's actually text after combining
+                        text_to_process = combined_text
+                        # print(f"Debug: Using combined subject/from for item {item.get('item_id', 'N/A')}") # Optional debug
+                    else:
+                        print(f"Warning: Skipping item {item.get('item_id', 'N/A')} - No 'content', and 'subject'/'from' are empty/invalid.")
+                        items_skipped += 1
+                        continue
+                else:
+                    print(f"Warning: Skipping item {item.get('item_id', 'N/A')} - No 'content', and 'subject'/'from' payload keys are missing or not strings.")
+                    items_skipped += 1
+                    continue
+
+            # Check if we successfully got text to process for this item
+            if text_to_process is not None and isinstance(text_to_process, str):
                 # Naive keyword extraction: lowercase, split, filter stop words & length
-                words = re.findall(r'\b\w+\b', content.lower())
+                words = re.findall(r'\b\w+\b', text_to_process.lower())
                 potential_keywords = [
                     word for word in words
                     if word not in STOP_WORDS and len(word) >= min_word_length
                 ]
                 word_counts.update(potential_keywords)
                 items_processed += 1
-            else:
-                print(f"Warning: Skipping item {item.get('item_id', 'N/A')} because payload['content'] is not a string: {type(content)}")
+            # This else shouldn't be strictly necessary due to checks above, but acts as a safeguard
+            elif text_to_process is None:
+                # Warning message already printed in the logic above
+                # items_skipped counter already incremented
+                pass
+            else: # Should not happen if logic above is correct, but catch non-string case
+                print(f"Warning: Skipping item {item.get('item_id', 'N/A')} - derived text_to_process was not a string: {type(text_to_process)}")
                 items_skipped += 1
+
 
         # Get the most common keywords
         most_common = word_counts.most_common(num_keywords_to_return)
