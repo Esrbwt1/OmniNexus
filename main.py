@@ -78,6 +78,11 @@ def add_connector_cli():
     config = {"type": connector_type} # Start config with the type
 
     for key, details in schema.items():
+        # --- Add this check ---
+        if key == "password_or_token": # Skip prompting for passwords directly
+            print(f"Note: Password for '{connector_type}' should be stored securely using the system keyring.")
+            continue # Skip to the next parameter in the schema
+        # --- End of added check ---
         required = details.get("required", False)
         prompt = f"Enter value for '{key}' ({details.get('type', 'any')})"
         if required:
@@ -116,7 +121,29 @@ def add_connector_cli():
                     config[key] = details['default']
                     print(f"Using default value: {config[key]}")
                 break # Optional field left blank is okay
+    
+    
+        # Inside add_connector_cli function, after the loop asking for config values:
 
+    # Add this message specifically after collecting IMAP config, before validation
+    if connector_type == "imap":
+        ImapConnectorClass = connectors.get_connector_class(connector_type) # Get the actual class
+        if ImapConnectorClass:
+            keyring_service_name = ImapConnectorClass.KEYRING_SERVICE_FORMAT.format(server=config.get("server","UNKNOWN"))
+            keyring_username = config.get("username","UNKNOWN")
+            print("\n" + "="*60)
+            print(f"IMPORTANT: You must store the password/token for user '{keyring_username}'")
+            print(f"in your system keyring under the service name:")
+            print(f"  '{keyring_service_name}'")
+            print("You can use the 'keyring' command-line tool:")
+            print(f'  keyring set "{keyring_service_name}" "{keyring_username}"')
+            print("(You will be prompted for the password securely).")
+            print("OmniNexus will attempt to retrieve it automatically when connecting.")
+            print("="*60)
+        else:
+             print("\nWARNING: Could not retrieve IMAP connector class to display keyring instructions.")
+
+    
     # Get a unique ID for this connector instance
     while True:
         connector_id = input("Enter a unique ID for this connector instance (e.g., 'my_docs'): ").strip()
