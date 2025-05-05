@@ -4,6 +4,39 @@
 from abc import ABC, abstractmethod
 import re # For simple word counting
 import collections
+import heapq # For efficiently finding top N sentences
+# NLTK imports
+try:
+    import nltk
+    from nltk.corpus import stopwords
+    from nltk.tokenize import sent_tokenize, word_tokenize
+    import os # Import os module
+
+    # Ensure data was downloaded (optional check)
+    try:
+         stopwords.words('english')
+         sent_tokenize("Test sentence.")
+         print("NLTK data 'punkt' and 'stopwords' seem available.") # Confirmation message
+    except LookupError:
+         # Keep existing error message block...
+         print("="*60)
+         print("ERROR: NLTK data ('punkt', 'stopwords') not found.")
+         print("Please run 'python -m nltk.downloader -d \"%USERPROFILE%/nltk_data\" stopwords punkt' (Windows)")
+         print("or 'python -m nltk.downloader -d \"$HOME/nltk_data\" stopwords punkt' (Linux/macOS)")
+         print("or use the interactive downloader in Python: nltk.download(['punkt', 'stopwords'])")
+         print(f"Searched paths: {nltk.data.path}") # Show where it searched
+         print("="*60)
+         raise ImportError("NLTK data not found. Please download.")
+    except Exception as e:
+         print(f"Warning: Error during NLTK initial check: {e}")
+
+except ImportError:
+    # Keep existing ImportError handling...
+    print("="*60)
+    print("ERROR: NLTK library not found. SummarizationAgent will not work.")
+    print("Please install it: pip install nltk")
+    print("="*60)
+    raise
 
 # --- Base Agent Class ---
 
@@ -346,12 +379,178 @@ class KeywordExtractAgent(BaseAgent):
             "items_skipped": items_skipped
         }
 
+class SummarizationAgent(BaseAgent):
+    """
+    A simple agent that performs extractive summarization on text content.
+    It ranks sentences based on the frequency of non-stop words they contain.
+    Uses standard Data Items (Phase 2/3). Requires NLTK library.
+    """
+
+    @classmethod
+    def get_config_schema(cls):
+        return {
+            "summary_sentences": {"type": "integer", "required": False, "default": 3, "description": "Number of sentences to include in the summary."},
+            # Future: Could add language config for stop words
+        }
+
+    def validate_config(self):
+        """Validate configuration."""
+        schema = self.get_config_schema()
+        num_sentences = self.config.get("summary_sentences", schema['summary_sentences']['default'])
+
+        if not isinstance(num_sentences, int) or num_sentences <= 0:
+            raise ValueError("'summary_sentences' must be a positive integer.")
+
+        self.config['summary_sentences'] = num_sentences
+
+    def get_metadata(self):
+        """Returns metadata about the SummarizationAgent."""
+        return {
+            "agent_id": self.agent_id,
+            "type": "summarizer",
+            "description": "Extracts a summary by selecting top-ranked sentences based on word frequency (requires NLTK).",
+            "config_schema": self.get_config_schema(),
+            "input_format": "List[Dict] conforming to protocol.DATA_ITEM_STRUCTURE with text in payload['content'] or fallback fields.",
+            "output_format": "Dictionary {'summary': str, 'items_processed': N, 'items_skipped': M}"
+        }
+
+    def _get_text_from_item(self, item):
+         """Helper to extract text, prioritizing content, fallback to subject/from."""
+         if not isinstance(item, dict) or 'payload' not in item or not isinstance(item['payload'], dict):
+             return None # Invalid structure
+
+         payload = item['payload']
+         text = payload.get('content')
+         if isinstance(text, str) and text.strip():
+             return text
+
+         # Fallback for emails etc.
+         subject = payload.get('subject')
+         sender = payload.get('from') # 'from' is a reserved keyword, use get()
+         combined = []
+         if isinstance(subject, str) and subject.strip(): combined.append(subject)
+         # Potentially add body_text if available and content was None/empty? Maybe too complex for now.
+         # if isinstance(payload.get('body_text'), str): combined.append(payload['body_text'])
+         if isinstance(sender, str) and sender.strip(): combined.append(sender)
+
+         if combined:
+              return " ".join(combined) # Combine subject/from
+         else:
+              return None # No usable text found
+
+    def execute(self, data_inputs, parameters=None):
+        """
+        Generates an extractive summary from the text content of input items.
+        """
+        items_processed = 0
+        items_skipped = 0
+        full_text = ""
+
+        # Determine parameters for this run
+        run_params = self.config.copy()
+        if isinstance(parameters, dict):
+            num_sent_override = parameters.get("summary_sentences")
+            try:
+                if num_sent_override is not None: run_params['summary_sentences'] = int(num_sent_override)
+                if run_params['summary_sentences'] <= 0: raise ValueError("summary_sentences must be positive")
+            except (ValueError, TypeError) as e:
+                print(f"Warning: Invalid execution parameter 'summary_sentences', using agent default. Error: {e}")
+                run_params = self.config.copy() # Revert
+
+        num_sentences_to_return = run_params['summary_sentences']
+
+        print(f"SummarizationAgent '{self.agent_id}' executing on {len(data_inputs)} data inputs...")
+        print(f"  Parameters: summary_sentences={num_sentences_to_return}")
+
+        if not isinstance(data_inputs, list):
+             print(f"Error: SummarizationAgent expects a list, got {type(data_inputs)}")
+             return {"summary": "", "items_processed": 0, "items_skipped": len(data_inputs) if isinstance(data_inputs, list) else 1, "error": "Invalid input format: Expected list"}
+
+        # 1. Concatenate text from all items
+        for item in data_inputs:
+             item_text = self._get_text_from_item(item)
+             if item_text:
+                  full_text += item_text + "\n\n" # Add separators between item texts
+                  items_processed += 1
+             else:
+                  print(f"Warning: Skipping item {item.get('item_id', 'N/A')} - Could not extract usable text.")
+                  items_skipped += 1
+
+        if not full_text.strip() or items_processed == 0:
+             print("No text content found to summarize.")
+             return {"summary": "", "items_processed": items_processed, "items_skipped": items_skipped}
+
+        # 2. Calculate word frequencies (excluding stop words)
+        stop_words_list = stopwords.words('english')
+        # Add common punctuation to stop words for frequency calculation
+        stop_words_list.extend(['.', ',', '!', '?', ';', ':', '(', ')', '[', ']', '{', '}', '--', '-'])
+        word_frequencies = collections.Counter()
+        # Use word_tokenize which handles punctuation better than basic split or regex for this purpose
+        try:
+             words = word_tokenize(full_text.lower())
+             for word in words:
+                  if word not in stop_words_list:
+                       word_frequencies[word] += 1
+        except Exception as e:
+             print(f"Error during word tokenization/frequency calculation: {e}")
+             return {"summary": "", "items_processed": items_processed, "items_skipped": items_skipped, "error": "Tokenization failed"}
+
+        # Find max frequency for normalization (optional but can help)
+        max_freq = max(word_frequencies.values()) if word_frequencies else 0
+
+        # 3. Tokenize into sentences
+        try:
+             sentences = sent_tokenize(full_text)
+        except Exception as e:
+              print(f"Error during sentence tokenization: {e}")
+              return {"summary": "", "items_processed": items_processed, "items_skipped": items_skipped, "error": "Sentence tokenization failed"}
+
+        if not sentences:
+             print("Could not tokenize text into sentences.")
+             return {"summary": "", "items_processed": items_processed, "items_skipped": items_skipped}
+
+        # 4. Calculate sentence scores
+        sentence_scores = {}
+        for i, sentence in enumerate(sentences):
+             try:
+                  sentence_words = word_tokenize(sentence.lower())
+                  score = 0
+                  for word in sentence_words:
+                       if word in word_frequencies:
+                            score += word_frequencies[word]
+                  # Normalize score by sentence length (optional, favors shorter high-freq sentences)
+                  # score = score / len(sentence_words) if sentence_words else 0
+                  sentence_scores[i] = score # Store score by original index
+             except Exception as e:
+                  print(f"Warning: Could not score sentence {i}: {e}")
+                  sentence_scores[i] = 0 # Assign 0 score if processing fails
+
+        # 5. Select top N sentences using heapq
+        # heapq.nlargest returns list of items (scores), we need the original sentences
+        # Get indices of top N scores
+        top_sentence_indices = heapq.nlargest(num_sentences_to_return, sentence_scores, key=sentence_scores.get)
+
+        # Sort the top indices so the summary reads in original order
+        top_sentence_indices.sort()
+
+        # 6. Build the summary string
+        summary = " ".join([sentences[i] for i in top_sentence_indices])
+
+        print(f"SummarizationAgent '{self.agent_id}' finished. Generated summary with {len(top_sentence_indices)} sentences. Processed: {items_processed}, Skipped: {items_skipped}")
+        return {
+            "summary": summary,
+            "items_processed": items_processed,
+            "items_skipped": items_skipped
+        }
+
+
 # --- Agent Registry and Factory ---
 
 # Add the new agent class to the registry dictionary
 _agent_types = {
     "word_counter": WordCountAgent,
-    "keyword_extractor": KeywordExtractAgent # Add the new type here
+    "keyword_extractor": KeywordExtractAgent,
+    "summarizer": SummarizationAgent # Add the new type here
 }
 
 

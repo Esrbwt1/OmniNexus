@@ -24,6 +24,87 @@ def initialize_system():
     # TODO: Maybe load/activate connectors from datastore automatically? For PoC, manual activation.
     print("--- System Initialized ---")
 
+
+# --- Add this new function definition ---
+def run_summarizer_cli(connector_id_and_args):
+    """Runs the summarization agent on data from a specific active connector."""
+    if not connector_id_and_args:
+        print("Usage: run_summarizer <connector_id> [summary_sentences=N]")
+        print("  Optional args override agent config for this run.")
+        return
+
+    # Basic parsing for optional args
+    parts = connector_id_and_args.split()
+    target_connector_id = parts[0]
+    exec_params = {}
+    for part in parts[1:]:
+        if '=' in part:
+            key, value = part.split('=', 1)
+            if key == "summary_sentences":
+                try:
+                    exec_params[key] = int(value)
+                except ValueError:
+                    print(f"Warning: Invalid integer value for execution parameter '{key}'. Ignoring.")
+            else:
+                print(f"Warning: Unknown execution parameter '{key}'. Ignoring.")
+
+    # 1. Get or automatically activate the connector instance (Using same logic as other run commands)
+    connector_instance = active_connectors.get(target_connector_id)
+    if not connector_instance:
+        print(f"Connector '{target_connector_id}' is not active. Attempting auto-activation...")
+        activate_connector_cli(target_connector_id)
+        connector_instance = active_connectors.get(target_connector_id)
+        if not connector_instance:
+             print(f"Auto-activation failed for '{target_connector_id}'. Cannot proceed.")
+             return
+        else:
+             print(f"Connector '{target_connector_id}' auto-activated successfully.")
+
+    # 2. Query data from the connector
+    print(f"\nQuerying data from connector '{target_connector_id}'...")
+    try:
+        data = connector_instance.query_data(query_params=None)
+        if data is None:
+             print("Error: Query to connector returned None.")
+             return
+        print(f"Retrieved {len(data)} data items from '{target_connector_id}'.")
+        if not data:
+             print("No data retrieved, nothing for the agent to process.")
+             return
+    except Exception as e:
+        print(f"Error querying connector '{target_connector_id}': {e}")
+        traceback.print_exc()
+        return
+
+    # 3. Create the SummarizationAgent instance
+    agent_id = "poc_summarizer"
+    agent_config = {"type": "summarizer"} # Uses default internal config
+    agent_instance = agents.create_agent_instance(agent_id, agent_config)
+
+    if not agent_instance:
+        print("Error: Failed to create SummarizationAgent instance.")
+        return
+
+    # 4. Execute the agent
+    print(f"\nExecuting agent '{agent_id}' with parameters: {exec_params if exec_params else 'Agent Defaults'}...")
+    try:
+        result = agent_instance.execute(data_inputs=data, parameters=exec_params if exec_params else None)
+        print("\n--- Agent Execution Result ---")
+        if isinstance(result, dict):
+             print("Summary:")
+             print(result.get('summary', '(No summary generated)'))
+             print(f"\nItems Processed: {result.get('items_processed', '?')}")
+             print(f"Items Skipped: {result.get('items_skipped', '?')}")
+             if 'error' in result: print(f"Error: {result['error']}")
+        else:
+             print(result)
+        print("-" * 20)
+    except Exception as e:
+        print(f"Error executing agent '{agent_id}': {e}")
+        traceback.print_exc()
+        print("-" * 20)
+
+
 # --- Modify display_help() ---
 def display_help():
     """Displays available commands."""
@@ -37,8 +118,8 @@ def display_help():
     print("  deactivate_connector <id> - Remove connector instance from memory")
     print("  remove_connector <id> - Remove connector configuration permanently")
     print("  run_word_count <connector_id> - Run WordCountAgent on data from the specified *active* connector")
-    # Add the new command here:
     print("  run_keyword_extractor <connector_id> [num_keywords=N] [min_word_length=M] - Run KeywordExtractAgent")
+    print("  run_summarizer <connector_id> [summary_sentences=N] - Run SummarizationAgent")
     print("  quit / exit         - Exit the application")
     print("-" * 20)
 
@@ -446,17 +527,18 @@ def main():
                  remove_connector_cli(args)
             elif command == "run_word_count":
                 run_word_count_cli(args)
-            # Add the elif block for the new command here:
             elif command == "run_keyword_extractor":
                 run_keyword_extractor_cli(args)
+            elif command == "run_summarizer":
+                run_summarizer_cli(args)
             # Add more commands here later
             else:
                 print(f"Unknown command: '{command}'. Type 'help' for options.")
-
         except Exception as e:
             print(f"\nAn unexpected error occurred: {e}")
             print("Please check the command and try again.")
             traceback.print_exc()
+            pass
 
 
 if __name__ == "__main__":
